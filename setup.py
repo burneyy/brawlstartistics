@@ -14,7 +14,8 @@ setup(
     ],
     entry_points={
         "console_scripts" : [
-            "bs_crawl = brawlstartistics.scripts.crawl:main"
+            "bs_crawl = brawlstartistics.scripts.crawl:main",
+            "bs_telegram_bot = brawlstartistics.scripts.telegram_bot:main"
         ]
     }
 )

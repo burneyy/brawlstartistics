@@ -10,6 +10,11 @@ import re
 import configparser
 import datetime
 import dateutil
+import logging
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s: %(levelname)-8s: %(name)-12s: %(message)s',
+                    datefmt='%d.%m.%y %H:%M')
+logger = logging.getLogger("brawlstartistics")
 
 #SQLALCHEMY
 from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean
@@ -32,8 +37,8 @@ ALL_BRAWLERS = [
     'Shelly', 'Nita', 'Colt', 'Bull', 'Jessie',  # league reward 0-500
     'Brock', 'Dynamike', 'Bo',                   # league reward 1000+
     'El Primo', 'Barley', 'Poco', 'Rosa',        # rare
-    'Rico', 'Penny', 'Darryl', 'Carl',       # super rare
-    'Frank', 'Pam', 'Piper',                     # epic
+    'Rico', 'Penny', 'Darryl', 'Carl',           # super rare
+    'Frank', 'Pam', 'Piper', 'Bibi',             # epic
     'Mortis', 'Tara', 'Gene',                    # mythic
     'Spike', 'Crow', 'Leon'                      # legendary
 ]
@@ -159,7 +164,12 @@ class Player(Base):
 
     @staticmethod
     def brawlstats_to_dict(bs_player):
-        date = dateutil.parser.parse(bs_player.resp.headers["Date"])
+        try:
+            date = dateutil.parser.parse(bs_player.resp.headers["Date"])
+        except AttributeError:
+            logger.warning(f"Could not get response time for player #{bs_player.tag}"
+                   " - take current UTC time instead")
+            date = datetime.datetime.utcnow()
         d = { "datetime" : date }
         for k, v in bs_player.raw_data.items():
             if k == "brawlers":
@@ -214,7 +224,13 @@ class Club(Base):
 
     @classmethod
     async def from_brawlstats(cls, bs_club, client=None):
-        date = dateutil.parser.parse(bs_club.resp.headers["Date"])
+        try:
+            date = dateutil.parser.parse(bs_club.resp.headers["Date"])
+        except AttributeError:
+            logger.warning(f"Warning: Could not get response time for club #{bs_club.tag}"
+                   " - take current UTC time instead")
+            date = datetime.datetime.utcnow()
+
         d = { "datetime" : date }
         for k, v in bs_club.raw_data.items():
             if k == "members":
@@ -296,6 +312,7 @@ class Client(brawlstats.Client):
         self.requestcnt = 0
         self.token = kwargs.pop("token", None)
         self.verbose = kwargs.pop("verbose", True)
+        is_async = kwargs.pop("is_async", True)
         echo = kwargs.pop("echo", False)
         if self.token is None:
             with open(os.path.join(BASE_DIR, "token.txt"), 'r') as file:
@@ -308,11 +325,15 @@ class Client(brawlstats.Client):
         dbsession = sessionmaker(bind=self.dbengine)
         self.dbsession = dbsession()
 
-        httpconnector = aiohttp.TCPConnector(limit=50) #50 requests at a time
-        httpsession = aiohttp.ClientSession(connector=httpconnector)
+        if is_async:
+            httpconnector = aiohttp.TCPConnector(limit=50) #50 requests at a time
+            httpsession = aiohttp.ClientSession(connector=httpconnector)
 
-        super().__init__(self.token, session=httpsession, is_async=True,
-                                     prevent_ratelimit=True, **kwargs)
+            super().__init__(self.token, session=httpsession, is_async=True,
+                             prevent_ratelimit=True, **kwargs)
+        else:
+            super().__init__(self.token, loop=None, is_async=False,
+                             **kwargs)
 
     def __enter__(self):
         return self
@@ -321,19 +342,22 @@ class Client(brawlstats.Client):
         return self.__enter__()
 
     def __exit__(self, exception_type, exception_value, traceback):
-        self.close()
+        return self.close()
 
     def close(self):
         self.dbsession.close()
-        super().close()
+        return super().close()
 
+    async def aclose(self):
+        self.dbsession.close()
+        return await super().close()
 
     async def __aexit__(self, exception_type, exception_value, traceback):
-        await super().close()
+        return await self.aclose()
 
     def print_msg(self, msg):
         if self.verbose:
-            print(msg)
+            logger.info(msg)
 
     async def _aget_model(self, url, model, key=None):
         obj = None
@@ -343,7 +367,7 @@ class Client(brawlstats.Client):
                 obj = await super()._aget_model(url, model, key)
             except brawlstats.errors.RateLimitError:
                 wait = 0.5
-                print(f"{url}: RateLimitError occurred, waiting...")
+                self.print_msg(f"{url}: RateLimitError occurred, waiting...")
                 await asyncio.sleep(wait)
             except brawlstats.errors.ServerError as err:
                 wait = 60
@@ -351,7 +375,7 @@ class Client(brawlstats.Client):
                 if consec_errs > 5:
                     raise err
                 else:
-                    print(f"{url}: ServerError occurred, waiting {wait}s...")
+                    self.print_msg(f"{url}: ServerError occurred, waiting {wait}s...")
                     await asyncio.sleep(wait)
             except brawlstats.errors.NotFoundError:
                 return None
@@ -360,27 +384,13 @@ class Client(brawlstats.Client):
         return obj
 
 
-    async def _aget_models(self, urls, model, key=None):
-        results = []
-        results = await asyncio.gather(*(self._aget_model(url, model=model, key=key)
-                                         for url in urls))
+    async def get_players(self, tags):
+        results = await asyncio.gather(*(self.get_player(tag) for tag in tags))
         return results
 
-
-    def _get_models(self, urls, model, key=None):
-        if self.is_async:
-            return self._aget_models(urls, model=model, key=key)
-        else:
-            return [self.get_model(url, model=model, key=key)
-                    for url in urls]
-
-    def get_players(self, tags):
-        urls = ['{}?tag={}'.format(self.api.PROFILE, tag) for tag in tags]
-        return self._get_models(urls, model=brawlstats.Player)
-
-    def get_clubs(self, tags):
-        urls = ['{}?tag={}'.format(self.api.CLUB, tag) for tag in tags]
-        return self._get_models(urls, model=brawlstats.Club)
+    async def get_clubs(self, tags):
+        results = await asyncio.gather(*(self.get_club(tag) for tag in tags))
+        return results
 
     async def crawl(self, player_limit=100):
         #1. Read random tags from database
@@ -394,7 +404,7 @@ class Client(brawlstats.Client):
         self.print_msg(f"Successfully updated information for {len(players)} players.")
 
         #3. Update information from their clubs
-        club_tags = [ p.tag for p in players if p.tag is not None ]
+        club_tags = [ p.club.tag for p in players if p.club is not None ]
         self.print_msg(f"Updating information for {len(club_tags)} clubs (of the players)...")
         clubs = await self.get_clubs(club_tags)
         clubs = [ club for club in clubs if club is not None ]
@@ -403,31 +413,68 @@ class Client(brawlstats.Client):
         #4. Building database club objects out of them (and updating member information)
         db_clubs = []
         self.print_msg(f"Processing clubs to update their members...")
-        for club in progressbar.progressbar(clubs):
+        for i, club in enumerate(clubs):
+            self.print_msg(f"Processing club {i+1} of {len(clubs)} (#{club.tag}) with {club.membersCount} members...")
             db_club = await Club.from_brawlstats(club, self)
             db_clubs.append(db_club)
+
+        #5. Set balanceChangeId
+        balance_change_id = self.get_last_balance_change()
+        if balance_change_id is not None:
+            balance_change_id = balance_change_id.id
+        brawler_change_ids = {}
+        for bname in ALL_BRAWLERS:
+            brawler_change_ids[bname] = self.get_last_brawler_change(bname)
+            if brawler_change_ids[bname] is not None:
+                brawler_change_ids[bname] = brawler_change_ids[bname].id
+        self.print_msg("Setting balance change ids to {} "
+                       "and brawler change ids to {!r}..."
+                       "".format(balance_change_id, brawler_change_ids))
+        for club in db_clubs:
+            club.balanceChangeId = balance_change_id
+            for member in club.members:
+                member.balanceChangeId = balance_change_id
+                for brawler in member.brawlers:
+                    brawler.brawlerChangeId = brawler_change_ids[brawler.name]
+
 
         self.print_msg(f"Storing crawled clubs, players and brawlers in database...")
         self.add_clubs(db_clubs)
         self.commit()
+
+        n_players = self.get_number_db_entries(UniquePlayer)
+        n_clubs = self.get_number_db_entries(UniqueClub)
+
+        self.print_msg(f"The database now contains {n_clubs} unique clubs and "
+                       f"{n_players} players.")
 
         return db_clubs
 
     def convert_time_string(self, timestring):
         return datetime.datetime.strptime(timestring, '%d.%m.%y %H:%M:%S')
 
-    def get_last_db_entry(self, dbmodel):
-        return self.dbsession.query(dbmodel).order_by(dbmodel.id.desc()).first()
+    def get_last_db_entry(self, dbmodel, **filters):
+        return self.query(dbmodel).filter_by(**filters).order_by(dbmodel.id.desc()).first()
 
     def get_random_db_entries(self, dbmodel, limit=100):
         """Return random entries from database"""
-        return self.dbsession.query(dbmodel).order_by(func.rand()).limit(limit).all()
+        return self.query(dbmodel).order_by(func.rand()).limit(limit).all()
+
+    def get_number_db_entries(self, dbmodel):
+        return self.query(dbmodel).count()
+
+    def get_last_brawler_change(self, name):
+        return self.get_last_db_entry(BrawlerChange, name=name)
+
 
     def get_last_balance_change(self):
         return self.get_last_db_entry(BalanceChange)
 
     def table_to_df(self, tablename):
         return pd.read_sql_query(f"SELECT * from {tablename};", self.dbengine)
+
+    def query(self, *args, **kwargs):
+        return self.dbsession.query(*args, **kwargs)
 
     def commit(self):
         self.dbsession.commit()
@@ -439,22 +486,35 @@ class Client(brawlstats.Client):
         try:
             self.add(dbobject)
             self.commit()
+            return True
         except IntegrityError:
             self.dbsession.rollback()
+            return False
 
     def add_all(self, dbobjects):
         self.dbsession.add_all(dbobjects)
 
     def add_clubs(self, dbclubs):
         #Build unique clubs and players out of it
+        n_clubs = 0
+        new_clubs = 0
+        n_players = 0
+        new_players = 0
         for club in dbclubs:
-            self.add_if_not_exists(UniqueClub(tag=club.tag,
-                                              added=datetime.datetime.utcnow()))
+            n_clubs += 1
+            if self.add_if_not_exists(
+                    UniqueClub(tag=club.tag, added=datetime.datetime.utcnow())):
+                new_clubs += 1
             for player in club.members:
-                self.add_if_not_exists(UniquePlayer(tag=player.tag,
-                                                    added=datetime.datetime.utcnow()))
+                n_players += 1
+                if self.add_if_not_exists(
+                        UniquePlayer(tag=player.tag, added=datetime.datetime.utcnow())):
+                    new_players += 1
 
         self.add_all(dbclubs)
+        self.print_msg(f"Added ({new_clubs}) {n_clubs} (new) clubs.")
+        self.print_msg(f"Added ({new_players}) {n_players} (new) players.")
+
 
 
     def new_balance_change(self, description, timestring):

@@ -5,3 +5,4 @@ database/
 state.ini
 token.txt
 db.txt
+telegram_bot_token.txt
