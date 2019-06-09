@@ -1,14 +1,12 @@
 #!/usr/bin/env python
-import brawlstartistics as bs
+from ..brawlstats import Client
 import asyncio
 import sys
 import logging
-
-logger = logging.getLogger("brawlstartistics")
-logger.setLevel(logging.INFO)
+logger = logging.getLogger(__name__)
 
 async def crawl(limit=100):
-    async with bs.Client() as client:
+    async with Client() as client:
         await client.crawl(limit)
 
 def main():

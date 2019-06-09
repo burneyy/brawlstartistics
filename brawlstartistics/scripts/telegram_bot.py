@@ -22,13 +22,12 @@ bot.
 """
 
 import logging
+from ..database import Client, UniqueClub, UniquePlayer
+from ..constants import BASE_DIR
 
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
 
 # Enable logging
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    level=logging.INFO)
-
 logger = logging.getLogger(__name__)
 
 
@@ -40,9 +39,9 @@ def start(update, context):
 
 def status(update, context):
     """Send a status report"""
-    with bs.Client(is_async=False) as client:
-        nplayers = client.get_number_db_entries(bs.UniquePlayer)
-        nclubs = client.get_number_db_entries(bs.UniqueClub)
+    with Client() as client:
+        nplayers = client.get_number_db_entries(UniquePlayer)
+        nclubs = client.get_number_db_entries(UniqueClub)
 
     update.message.reply_text(f"The BrawlStartistics DB currently contains\nPlayers: {nplayers}\nClubs: {nclubs}")
 
@@ -66,7 +65,6 @@ def main():
     # Create the Updater and pass it your bot's token.
     # Make sure to set use_context=True to use the new context based callbacks
     # Post version 12 this will no longer be necessary
-    BASE_DIR = "/home/burney/opt/brawlstartistics"
     with open(os.path.join(BASE_DIR, "telegram_bot_token.txt"), "r") as file:
         token = file.read().strip()
     updater = Updater(token, use_context=True)
